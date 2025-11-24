@@ -31,7 +31,7 @@ class ASRBase:
     sep = " "   # join transcribe words with this character (" " for whisper_timestamped,
                 # "" for faster-whisper because it emits the spaces when neeeded)
 
-    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr):
+    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr, device_index=0):
         self.logfile = logfile
 
         self.transcribe_kargs = {}
@@ -40,10 +40,10 @@ class ASRBase:
         else:
             self.original_language = lan
 
-        self.model = self.load_model(modelsize, cache_dir, model_dir)
+        self.model = self.load_model(modelsize, cache_dir, model_dir, device_index=device_index)
 
 
-    def load_model(self, modelsize, cache_dir):
+    def load_model(self, modelsize, cache_dir, model_dir, device_index):
         raise NotImplemented("must be implemented in the child class")
 
     def transcribe(self, audio, init_prompt=""):
@@ -60,7 +60,7 @@ class WhisperTimestampedASR(ASRBase):
 
     sep = " "
 
-    def load_model(self, modelsize=None, cache_dir=None, model_dir=None):
+    def load_model(self, modelsize=None, cache_dir=None, model_dir=None, device_index=0):
         import whisper
         import whisper_timestamped
         from whisper_timestamped import transcribe_timestamped
@@ -103,7 +103,7 @@ class FasterWhisperASR(ASRBase):
 
     sep = ""
 
-    def load_model(self, modelsize=None, cache_dir=None, model_dir=None):
+    def load_model(self, modelsize=None, cache_dir=None, model_dir=None, device_index=0):
         from faster_whisper import WhisperModel
 #        logging.getLogger("faster_whisper").setLevel(logger.level)
         if model_dir is not None:
@@ -116,7 +116,7 @@ class FasterWhisperASR(ASRBase):
 
 
         # this worked fast and reliably on NVIDIA L40
-        model = WhisperModel(model_size_or_path, device="cuda", compute_type="float16", download_root=cache_dir)
+        model = WhisperModel(model_size_or_path, device_index=device_index, compute_type="float16", download_root=cache_dir)
 
         # or run on GPU with INT8
         # tested: the transcripts were different, probably worse than with FP16, and it was slightly (appx 20%) slower
@@ -165,7 +165,7 @@ class MLXWhisper(ASRBase):
 
     sep = " "
 
-    def load_model(self, modelsize=None, cache_dir=None, model_dir=None):
+    def load_model(self, modelsize=None, cache_dir=None, model_dir=None, device_index=0):
         """
             Loads the MLX-compatible Whisper model.
 
