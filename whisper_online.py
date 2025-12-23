@@ -178,10 +178,10 @@ class FasterWhisperASR(ASRBase):
 class FasterWhisperWorker:
     """Faster Whisper Worker Class."""
 
-    def __init__(self, job_queue: RayQueue, lan: str="zh", modelsize: str="large-v2") -> None:
+    def __init__(self, job_queue: RayQueue, lan: str="zh", model_size_or_path: str="large-v2") -> None:
         """Initialize the Faster Whisper Worker."""
 
-        self.model = FasterWhisperASR(lan=lan, modelsize=modelsize)
+        self.model = FasterWhisperASR(lan=lan, model_dir=model_size_or_path)
         self.model.use_vad()
         self.model.transcribe_kargs["repetition_penalty"] = 1  # pyright: ignore[reportUnknownMemberType]
         self.model.transcribe_kargs["no_repeat_ngram_size"] = 0  # pyright: ignore[reportUnknownMemberType]
@@ -220,6 +220,17 @@ class RayFasterWhisperASR(ASRBase):
         logfile: TextIO = sys.stderr,
         device_index: int = 0
     ) -> None:
+        if lan != "zh":
+            raise NotImplementedError("Please assign lan in the ASR worker")
+        if modelsize is not None:
+            raise NotImplementedError("Please assign model_size_or_path in the ASR worker")
+        if cache_dir is not None:
+            raise NotImplementedError("Please assign cache_dir in the ASR worker")
+        if model_dir is not None:
+            raise NotImplementedError("Please assign model_size_or_path in the ASR worker")
+        if device_index != 0:
+            raise NotImplementedError("Please assign device_index in the ASR worker")
+        
         super().__init__(
             lan=lan,
             modelsize=modelsize,
