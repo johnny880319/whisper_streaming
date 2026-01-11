@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import sys
+import traceback
 from typing import TextIO
 import numpy as np
 import librosa
@@ -16,6 +18,7 @@ import math
 import ray
 from typing import TYPE_CHECKING
 from ray.util.queue import Queue as RayQueue
+from ray.util.queue import Empty, Full
 
 if TYPE_CHECKING:
     import numpy as np
@@ -180,6 +183,7 @@ class FasterWhisperWorker:
 
     def __init__(self, job_queue: RayQueue, lan: str="zh", model_size_or_path: str="large-v2") -> None:
         """Initialize the Faster Whisper Worker."""
+        print(f"[Worker Init] PID={os.getpid()} Initializing model...", flush=True)
 
         self.model = FasterWhisperASR(lan=lan, model_dir=model_size_or_path)
         self.model.use_vad()
@@ -187,18 +191,41 @@ class FasterWhisperWorker:
         self.model.transcribe_kargs["no_repeat_ngram_size"] = 0  # pyright: ignore[reportUnknownMemberType]
 
         self.job_queue = job_queue
+        print(f"[Worker Init] PID={os.getpid()} Ready.", flush=True)
 
     def run_consumption_loop(self) -> None:
         """Run the consumption loop for processing audio jobs."""
+        print(f"[Worker Loop] PID={os.getpid()} Loop Started", flush=True)
         while True:
+            try:
+                self._comsume_once()
+            except Exception as e:
+                print(f"[Worker {os.getpid()}] CRITICAL LOOP ERROR: {e}", flush=True)
+                traceback.print_exc()
+                time.sleep(1)  # Prevent tight loop on critical errors
+
+    def _comsume_once(self) -> None:
+        try:
             audio_array: npt.NDArray[np.float32]
             init_prompt: str
             reply_queue: RayQueue
 
-            audio_array, init_prompt, reply_queue = self.job_queue.get()
+            audio_array, init_prompt, reply_queue = self.job_queue.get(timeout=5)
+        except Empty:
+            return
+        
+        segments_list: list[Segment]|Exception
+        try:
             segments_list = self.model.transcribe(audio=audio_array, init_prompt=init_prompt)
+        except Exception as e:
+            print(f"[Worker {os.getpid()}] ERROR during transcription: {e}", flush=True)
+            traceback.print_exc()
+            segments_list = e
 
-            reply_queue.put(segments_list)
+        try:
+            reply_queue.put(segments_list, timeout=5)
+        except Full:
+            print(f"[Worker {os.getpid()}] WARNING: Reply queue full, RayFasterWhisperASR may have died, dropping result.", flush=True)
     
     def get_gpu_ids(self) -> list[int]|list[str]:
         return ray.get_gpu_ids()
@@ -241,7 +268,7 @@ class RayFasterWhisperASR(ASRBase):
         )
 
         self.global_asr_queue = global_asr_queue
-        self.my_reply_queue = RayQueue(maxsize=1)
+        self.my_reply_queue = RayQueue(maxsize=10)
 
 
     def load_model(
@@ -254,8 +281,26 @@ class RayFasterWhisperASR(ASRBase):
         pass
 
     def transcribe(self, audio: npt.NDArray[np.float32], init_prompt: str="") -> list[Segment]:
-        self.global_asr_queue.put((audio, init_prompt, self.my_reply_queue))
-        return self.my_reply_queue.get()
+        try:
+            self.global_asr_queue.put((audio, init_prompt, self.my_reply_queue), timeout=5)
+        except Full:
+            print("[RayFasterWhisperASR] WARNING: Global ASR queue full, dropping job.", flush=True)
+            return []
+        except Exception as e:
+            print(f"[RayFasterWhisperASR] ERROR: Failed to put job in global ASR queue: {e}", flush=True)
+            traceback.print_exc()
+            return []
+        
+        try:
+            result = self.my_reply_queue.get(timeout=10)
+        except Empty:
+            print("[RayFasterWhisperASR] WARNING: Timeout waiting for ASR result, returning empty result.", flush=True)
+            return []
+
+        if isinstance(result, Exception):
+            print(f"[RayFasterWhisperASR] ERROR: Exception during transcription: {result}", flush=True)
+            return []
+        return result
 
     def ts_words(self, segments: list[Segment]) -> list[tuple[float, float, str]]:
         o: list[tuple[float, float, str]] = []
