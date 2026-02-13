@@ -1,0 +1,10 @@
+{
+  "notebook.output.scrolling": true,
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+    }
+  },
+}
