@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+import os
 import sys
+import traceback
+from typing import TextIO
 import numpy as np
 import librosa
 from functools import lru_cache
@@ -9,6 +14,16 @@ import logging
 import io
 import soundfile as sf
 import math
+
+import ray
+from typing import TYPE_CHECKING
+from ray.util.queue import Queue as RayQueue
+from ray.util.queue import Empty, Full
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+    from faster_whisper.transcribe import Segment
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +46,15 @@ class ASRBase:
     sep = " "   # join transcribe words with this character (" " for whisper_timestamped,
                 # "" for faster-whisper because it emits the spaces when neeeded)
 
-    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr):
+    def __init__(
+        self,
+        lan: str,
+        modelsize: str|None=None,
+        cache_dir: str|None=None,
+        model_dir: str|None=None,
+        logfile: TextIO=sys.stderr,
+        device_index: int=0
+    ) -> None:
         self.logfile = logfile
 
         self.transcribe_kargs = {}
@@ -40,16 +63,16 @@ class ASRBase:
         else:
             self.original_language = lan
 
-        self.model = self.load_model(modelsize, cache_dir, model_dir)
+        self.model = self.load_model(modelsize, cache_dir, model_dir, device_index=device_index)
 
 
-    def load_model(self, modelsize, cache_dir):
+    def load_model(self, modelsize, cache_dir, model_dir, device_index) -> any:
         raise NotImplemented("must be implemented in the child class")
 
-    def transcribe(self, audio, init_prompt=""):
+    def transcribe(self, audio, init_prompt="") -> list[any]:
         raise NotImplemented("must be implemented in the child class")
 
-    def use_vad(self):
+    def use_vad(self) -> None:
         raise NotImplemented("must be implemented in the child class")
 
 
@@ -60,7 +83,7 @@ class WhisperTimestampedASR(ASRBase):
 
     sep = " "
 
-    def load_model(self, modelsize=None, cache_dir=None, model_dir=None):
+    def load_model(self, modelsize=None, cache_dir=None, model_dir=None, device_index=0):
         import whisper
         import whisper_timestamped
         from whisper_timestamped import transcribe_timestamped
@@ -95,15 +118,13 @@ class WhisperTimestampedASR(ASRBase):
         self.transcribe_kargs["task"] = "translate"
 
 
-
-
 class FasterWhisperASR(ASRBase):
     """Uses faster-whisper library as the backend. Works much faster, appx 4-times (in offline mode). For GPU, it requires installation with a specific CUDNN version.
     """
 
     sep = ""
 
-    def load_model(self, modelsize=None, cache_dir=None, model_dir=None):
+    def load_model(self, modelsize=None, cache_dir=None, model_dir=None, device_index=0):
         from faster_whisper import WhisperModel
 #        logging.getLogger("faster_whisper").setLevel(logger.level)
         if model_dir is not None:
@@ -116,7 +137,7 @@ class FasterWhisperASR(ASRBase):
 
 
         # this worked fast and reliably on NVIDIA L40
-        model = WhisperModel(model_size_or_path, device="cuda", compute_type="float16", download_root=cache_dir)
+        model = WhisperModel(model_size_or_path, device_index=device_index, compute_type="float16", download_root=cache_dir)
 
         # or run on GPU with INT8
         # tested: the transcripts were different, probably worse than with FP16, and it was slightly (appx 20%) slower
@@ -127,7 +148,7 @@ class FasterWhisperASR(ASRBase):
 #        model = WhisperModel(modelsize, device="cpu", compute_type="int8") #, download_root="faster-disk-cache-dir/")
         return model
 
-    def transcribe(self, audio, init_prompt=""):
+    def transcribe(self, audio: npt.NDArray[np.float32], init_prompt: str="") -> list[Segment]:
 
         # tested: beam_size=5 is faster and better than 1 (on one 200 second document from En ESIC, min chunk 0.01)
         segments, info = self.model.transcribe(audio, language=self.original_language, initial_prompt=init_prompt, beam_size=5, word_timestamps=True, condition_on_previous_text=True, **self.transcribe_kargs)
@@ -135,7 +156,7 @@ class FasterWhisperASR(ASRBase):
 
         return list(segments)
 
-    def ts_words(self, segments):
+    def ts_words(self, segments: list[Segment]):
         o = []
         for segment in segments:
             for word in segment.words:
@@ -156,6 +177,149 @@ class FasterWhisperASR(ASRBase):
     def set_translate_task(self):
         self.transcribe_kargs["task"] = "translate"
 
+
+class FasterWhisperWorker:
+    """Faster Whisper Worker Class."""
+
+    def __init__(self, job_queue: RayQueue, lan: str="zh", model_size_or_path: str="large-v2") -> None:
+        """Initialize the Faster Whisper Worker."""
+        print(f"[Worker Init] PID={os.getpid()} Initializing model...", flush=True)
+
+        self.model = FasterWhisperASR(lan=lan, model_dir=model_size_or_path)
+        self.model.use_vad()
+        self.model.transcribe_kargs["repetition_penalty"] = 1  # pyright: ignore[reportUnknownMemberType]
+        self.model.transcribe_kargs["no_repeat_ngram_size"] = 0  # pyright: ignore[reportUnknownMemberType]
+
+        self.job_queue = job_queue
+        print(f"[Worker Init] PID={os.getpid()} Ready.", flush=True)
+
+    def run_consumption_loop(self) -> None:
+        """Run the consumption loop for processing audio jobs."""
+        print(f"[Worker Loop] PID={os.getpid()} Loop Started", flush=True)
+        while True:
+            try:
+                self._comsume_once()
+            except Exception as e:
+                print(f"[Worker {os.getpid()}] CRITICAL LOOP ERROR: {e}", flush=True)
+                traceback.print_exc()
+                time.sleep(1)  # Prevent tight loop on critical errors
+
+    def _comsume_once(self) -> None:
+        try:
+            audio_array: npt.NDArray[np.float32]
+            init_prompt: str
+            reply_queue: RayQueue
+
+            audio_array, init_prompt, reply_queue = self.job_queue.get(timeout=5)
+        except Empty:
+            return
+        
+        segments_list: list[Segment]|Exception
+        try:
+            segments_list = self.model.transcribe(audio=audio_array, init_prompt=init_prompt)
+        except Exception as e:
+            print(f"[Worker {os.getpid()}] ERROR during transcription: {e}", flush=True)
+            traceback.print_exc()
+            segments_list = e
+
+        try:
+            reply_queue.put(segments_list, timeout=5)
+        except Full:
+            print(f"[Worker {os.getpid()}] WARNING: Reply queue full, RayFasterWhisperASR may have died, dropping result.", flush=True)
+    
+    def get_gpu_ids(self) -> list[int]|list[str]:
+        return ray.get_gpu_ids()
+
+
+class RayFasterWhisperASR(ASRBase):
+    """Uses faster-whisper library as the backend. Works much faster, appx 4-times (in offline mode). For GPU, it requires installation with a specific CUDNN version.
+    """
+
+    sep = ""
+
+    def __init__(
+        self,
+        global_asr_queue: RayQueue,
+        lan: str="zh",
+        modelsize: str|None = None,
+        cache_dir: str|None = None,
+        model_dir: str|None = None,
+        logfile: TextIO = sys.stderr,
+        device_index: int = 0
+    ) -> None:
+        if lan != "zh":
+            raise NotImplementedError("Please assign lan in the ASR worker")
+        if modelsize is not None:
+            raise NotImplementedError("Please assign model_size_or_path in the ASR worker")
+        if cache_dir is not None:
+            raise NotImplementedError("Please assign cache_dir in the ASR worker")
+        if model_dir is not None:
+            raise NotImplementedError("Please assign model_size_or_path in the ASR worker")
+        if device_index != 0:
+            raise NotImplementedError("Please assign device_index in the ASR worker")
+        
+        super().__init__(
+            lan=lan,
+            modelsize=modelsize,
+            cache_dir=cache_dir,
+            model_dir=model_dir,
+            logfile=logfile,
+            device_index=device_index
+        )
+
+        self.global_asr_queue = global_asr_queue
+        self.my_reply_queue = RayQueue(maxsize=10)
+
+
+    def load_model(
+        self,
+        modelsize: str|None=None,
+        cache_dir: str|None=None,
+        model_dir: str|None=None,
+        device_index: int=0
+    ) -> None:
+        pass
+
+    def transcribe(self, audio: npt.NDArray[np.float32], init_prompt: str="") -> list[Segment]:
+        try:
+            self.global_asr_queue.put((audio, init_prompt, self.my_reply_queue), timeout=5)
+        except Full:
+            print("[RayFasterWhisperASR] WARNING: Global ASR queue full, dropping job.", flush=True)
+            return []
+        except Exception as e:
+            print(f"[RayFasterWhisperASR] ERROR: Failed to put job in global ASR queue: {e}", flush=True)
+            traceback.print_exc()
+            return []
+        
+        try:
+            result = self.my_reply_queue.get(timeout=10)
+        except Empty:
+            print("[RayFasterWhisperASR] WARNING: Timeout waiting for ASR result, returning empty result.", flush=True)
+            return []
+
+        if isinstance(result, Exception):
+            print(f"[RayFasterWhisperASR] ERROR: Exception during transcription: {result}", flush=True)
+            return []
+        return result
+
+    def ts_words(self, segments: list[Segment]) -> list[tuple[float, float, str]]:
+        o: list[tuple[float, float, str]] = []
+        for segment in segments:
+            if not segment.words:
+                continue
+            for word in segment.words:
+                if segment.no_speech_prob > 0.9:
+                    continue
+                # not stripping the spaces -- should not be merged with them!
+                w = word.word
+                t = (word.start, word.end, w)
+                o.append(t)
+        return o
+
+    def segments_end_ts(self, res: list[Segment]) -> list[float]:
+        return [s.end for s in res]
+
+
 class MLXWhisper(ASRBase):
     """
     Uses MLX Whisper library as the backend, optimized for Apple Silicon.
@@ -165,7 +329,7 @@ class MLXWhisper(ASRBase):
 
     sep = " "
 
-    def load_model(self, modelsize=None, cache_dir=None, model_dir=None):
+    def load_model(self, modelsize=None, cache_dir=None, model_dir=None, device_index=0):
         """
             Loads the MLX-compatible Whisper model.
 
