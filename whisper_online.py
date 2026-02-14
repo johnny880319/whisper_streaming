@@ -260,17 +260,12 @@ class FasterWhisperWorkerCluster:
 
     def __init__(
         self,
-        working_dir: str,
         lan: str = "zh",
         model_size_or_path: str = "large-v2",
         max_worker_count: int | None = None,
     ) -> None:
         """Initialize the Faster Whisper Worker Cluster."""
-        ray.init(  # pyright: ignore[reportUnknownMemberType]
-            runtime_env={
-                "working_dir": working_dir,
-            }
-        )
+        ray.init()  # pyright: ignore[reportUnknownMemberType]
         self._global_asr_queue = RayQueue()
 
         cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
