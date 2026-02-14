@@ -1,0 +1,41 @@
+[project]
+name = "ray-whisper-streaming"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper",
+    "librosa",
+    "ray",
+    "soundfile",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel",
+    "pyright",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 120
+fix = true
+exclude = [
+    ".venv",
+    "libs",
+]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D203", # incorrect-blank-line-before-class, conflicts with D211
+    "D213", # multi-line-summary-second-line, conflicts with D212
+    "COM812", # missing-trailing-comma, conflicts with formatters
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
