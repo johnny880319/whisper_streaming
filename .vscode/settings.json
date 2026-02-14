@@ -7,4 +7,7 @@
       "source.fixAll": "explicit",
     }
   },
+    "python.autoComplete.extraPaths": [
+        "./src"
+    ]
 }
