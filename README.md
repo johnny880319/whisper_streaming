@@ -37,6 +37,15 @@ uv sync --lock
 pip install -e .
 ```
 
+## Running the Script
+
+Since uv run is not compatible with Ray, you need to run your script with python -m to make sure the dependencies are correctly loaded in the Ray workers.
+
+```bash
+source .venv/bin/activate
+python -m path.to.your.script
+```
+
 ## Usage
 
 1. Create one `FasterWhisperWorkerCluster`.
@@ -47,22 +56,20 @@ pip install -e .
 ```python
 # set CUDA_VISIBLE_DEVICES to specify which GPUs to use.
 import os
-import sys
 
-working_dir = "/your/local/path/to/ray_whisper_streaming"
-sys.path.append(working_dir)
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
 
 # import used modules
+from pathlib import Path
+
 import librosa
 import numpy as np
 
 from whisper_online import FasterWhisperWorkerCluster, OnlineASRProcessor, RayFasterWhisperASR
 
 # create and run the Faster Whisper Worker Cluster.
-# You should pass the working_dir to the constructor to make sure the ray workers can import the necessary modules.
 # The worker count will be automatically set to the number of GPUs specified in CUDA_VISIBLE_DEVICES, but you can also set a max_worker_count to limit it.
-faster_whisper_cluster = FasterWhisperWorkerCluster(working_dir=working_dir)
+faster_whisper_cluster = FasterWhisperWorkerCluster()
 faster_whisper_cluster.run()
 
 # The ASR message queue that load balances the ASR jobs to the whisper workers
@@ -114,7 +121,6 @@ You can configure the FasterWhisperWorkerCluster with following parameters:
 
 | Parameter | Description | Default |
 | --- | --- | --- |
-| `working_dir` | The working directory that contains the necessary modules for the ray workers. | (required) |
 | `lan` | The language for the ASR model. | `"zh"` |
 | `model_size_or_path` | The model size or path to load the Faster Whisper model. | `"large-v2"` |
 | `max_worker_count` | The maximum number of workers to use. The actual worker count will be the minimum of this value and the number of available GPUs. If not specified, it will be set to the number of GPUs available. | `None` |
