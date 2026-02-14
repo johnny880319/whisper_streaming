@@ -648,8 +648,9 @@ class OnlineASRProcessor:
         non_prompt = self.commited[k:]
         return self.asr.sep.join(prompt[::-1]), self.asr.sep.join(t for _, _, t in non_prompt)
 
-    def process_iter(self):
-        """Runs on the current audio buffer.
+    def process_iter(self) -> tuple[float | None, float | None, str]:
+        """Run on the current audio buffer.
+
         Returns: a tuple (beg_timestamp, end_timestamp, "text"), or (None, None, "").
         The non-emty text is confirmed (committed) partial transcript.
         """
@@ -769,8 +770,9 @@ class OnlineASRProcessor:
                 sent = sent[len(w) :].strip()
         return out
 
-    def finish(self):
+    def finish(self) -> tuple[float | None, float | None, str]:
         """Flush the incomplete text when the whole processing ends.
+
         Returns: the same format as self.process_iter()
         """
         o = self.transcript_buffer.complete()
@@ -779,7 +781,7 @@ class OnlineASRProcessor:
         self.buffer_time_offset += len(self.audio_buffer) / 16000
         return f
 
-    def to_flush(self, sents, sep=None, offset=0):
+    def to_flush(self, sents, sep=None, offset=0) -> tuple[float | None, float | None, str]:
         # concatenates the timestamped words or sentences into one sequence that is flushed in one line
         # sents: [(beg1, end1, "sentence1"), ...] or [] if empty
         # return: (beg1,end-of-last-sentence,"concatenation of sentences") or (None, None, "") if empty
