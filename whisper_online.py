@@ -249,6 +249,55 @@ class FasterWhisperWorker:
         return ray.get_gpu_ids()
 
 
+class FasterWhisperWorkerCluster:
+    """Manages a cluster of Faster Whisper Workers using Ray for distributed processing.
+
+    You should initialize CUDA_VISIBLE_DEVICES before creating the cluster, and it will create one worker per GPU.
+    You should pass working_dir to the constructor to make sure the ray workers can import the necessary modules.
+    You can also set max_worker_count to limit the number of workers \
+    if you have many GPUs but don't want to use them all.
+    """
+
+    def __init__(
+        self,
+        working_dir: str,
+        lan: str = "zh",
+        model_size_or_path: str = "large-v2",
+        max_worker_count: int | None = None,
+    ) -> None:
+        """Initialize the Faster Whisper Worker Cluster."""
+        ray.init(  # pyright: ignore[reportUnknownMemberType]
+            runtime_env={
+                "working_dir": working_dir,
+            }
+        )
+        self._global_asr_queue = RayQueue()
+
+        cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        cuda_list = cuda_devices.split(",") if cuda_devices else []
+        worker_count = min(max_worker_count, len(cuda_list)) if max_worker_count is not None else len(cuda_list)
+
+        self._workers = [
+            ray.remote(FasterWhisperWorker)
+            .options(num_gpus=0.6)  # pyright: ignore[reportUnknownMemberType]
+            .remote(  # pyright: ignore[reportUnknownMemberType]
+                job_queue=self._global_asr_queue,
+                lan=lan,
+                model_size_or_path=model_size_or_path,
+            )
+            for _ in range(worker_count)
+        ]
+
+    def get_global_asr_queue(self) -> RayQueue:
+        """Get the global ASR job queue for submitting audio transcription jobs."""
+        return self._global_asr_queue
+
+    def run(self) -> None:
+        """Start all workers in the cluster."""
+        for worker in self._workers:
+            ray.method(worker.run_consumption_loop).remote()  # pyright: ignore[reportUnknownMemberType]
+
+
 class RayFasterWhisperASR(ASRBase):
     """Uses faster-whisper library as the backend. Works much faster, appx 4-times (in offline mode). For GPU, it requires installation with a specific CUDNN version."""
 
@@ -626,7 +675,7 @@ class OnlineASRProcessor:
         self.transcript_buffer.last_commited_time = self.buffer_time_offset
         self.commited = []
 
-    def insert_audio_chunk(self, audio):
+    def insert_audio_chunk(self, audio: npt.NDArray[np.float32]) -> None:
         self.audio_buffer = np.append(self.audio_buffer, audio)
 
     def prompt(self):
